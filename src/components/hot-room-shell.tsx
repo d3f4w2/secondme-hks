@@ -5,8 +5,8 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import type {
   AgentParticipant,
   RoomState,
+  SearchEvidence,
   SessionUser,
-  Topic,
   TopicsPayload,
   UserContext,
 } from "@/lib/types";
@@ -45,6 +45,28 @@ function sourceText(payload: TopicsPayload) {
 
 function participantClassName(participant: AgentParticipant, selected: boolean) {
   return `participant-chip accent-${participant.accent}${selected ? " is-selected" : ""}`;
+}
+
+function EvidenceCard({ evidence }: { evidence: SearchEvidence }) {
+  return (
+    <article className="evidence-card">
+      <div className="evidence-meta">
+        <span>{evidence.sourceLabel}</span>
+        {evidence.authorityLevel ? <span>authority_level: {evidence.authorityLevel}</span> : null}
+      </div>
+      <h3>{evidence.title}</h3>
+      <p>{evidence.summary}</p>
+      <div className="evidence-footer">
+        <span>{evidence.author ?? "匿名来源"}</span>
+        <a href={evidence.link} target="_blank" rel="noreferrer">
+          打开原文
+        </a>
+      </div>
+      {evidence.featuredComment ? (
+        <blockquote>{evidence.featuredComment}</blockquote>
+      ) : null}
+    </article>
+  );
 }
 
 export function HotRoomShell({ initialUser, statusMessage }: HotRoomShellProps) {
@@ -277,6 +299,10 @@ export function HotRoomShell({ initialUser, statusMessage }: HotRoomShellProps) 
     () => room?.turns.slice(0, visibleTurnCount) ?? [],
     [room, visibleTurnCount],
   );
+  const visibleEvidence = useMemo(
+    () => room?.searchEvidence.slice(0, 6) ?? [],
+    [room?.searchEvidence],
+  );
   const isDiscussionRunning = Boolean(room && visibleTurnCount < room.turns.length);
 
   return (
@@ -296,6 +322,7 @@ export function HotRoomShell({ initialUser, statusMessage }: HotRoomShellProps) 
           <div className="meta-row">
             <span>{sourceText(topicsPayload)}</span>
             <span>多代理交锋</span>
+            <span>可信搜入流</span>
             <span>围观 + 追问</span>
           </div>
         </div>
@@ -308,8 +335,8 @@ export function HotRoomShell({ initialUser, statusMessage }: HotRoomShellProps) 
               <h2>{initialUser ? initialUser.name : "还未连接"}</h2>
               <p>
                 {initialUser
-                  ? "你可以围观热榜讨论，并在结果出来后向某个代理继续追问。"
-                  : "未登录也能围观热榜讨论，登录后可用 SecondMe 个性化追问。"}
+                  ? "你可以围观热榜讨论，并在结果出来后向某个代理继续追问。追问会结合你的 SecondMe 画像和知乎可信搜证据。"
+                  : "未登录也能围观热榜讨论，登录后追问会结合你的 SecondMe 画像。"}
               </p>
             </div>
             <div className="identity-actions">
@@ -381,7 +408,13 @@ export function HotRoomShell({ initialUser, statusMessage }: HotRoomShellProps) 
               <p>{selectedTopic?.summary ?? "选择左侧热榜后，这里会展开多代理讨论。"}</p>
             </div>
             <div className="room-status">
-              <span>{isLoadingRoom ? "正在组房" : isDiscussionRunning ? "Agent 正在交锋" : "房间已收束"}</span>
+              <span>
+                {isLoadingRoom
+                  ? "正在组房"
+                  : isDiscussionRunning
+                    ? "Agent 正在交锋"
+                    : "房间已收束"}
+              </span>
               <a href={selectedTopic?.link ?? "https://www.zhihu.com/"} target="_blank" rel="noreferrer">
                 查看来源
               </a>
@@ -427,6 +460,9 @@ export function HotRoomShell({ initialUser, statusMessage }: HotRoomShellProps) 
                     <span key={`${turn.id}-${item}`}>{item}</span>
                   ))}
                 </div>
+                {turn.sourceIds.length ? (
+                  <p className="turn-sources">引用证据：{turn.sourceIds.join(" / ")}</p>
+                ) : null}
               </article>
             ))}
 
@@ -460,6 +496,25 @@ export function HotRoomShell({ initialUser, statusMessage }: HotRoomShellProps) 
                 <h3>{room.summary.caution}</h3>
               </article>
             </div>
+          ) : null}
+
+          {room ? (
+            <section className="evidence-board">
+              <div className="evidence-board-header">
+                <div>
+                  <p className="eyebrow">可信搜证据池</p>
+                  <h2>这些知乎内容在给代理提供真实论据</h2>
+                </div>
+                <span className={`source-pill ${room.searchSource === "mock" ? "is-fallback" : ""}`}>
+                  {room.searchSource === "mock" ? "可信搜回退源" : "可信搜接口"}
+                </span>
+              </div>
+              <div className="evidence-grid">
+                {visibleEvidence.map((item) => (
+                  <EvidenceCard key={item.id} evidence={item} />
+                ))}
+              </div>
+            </section>
           ) : null}
 
           {room ? (

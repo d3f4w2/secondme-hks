@@ -45,6 +45,7 @@ git push -u origin main
 
 需要重点确认两项：
 
+- `APP_BASE_URL` 建议设置成站点根地址，例如 `https://your-project.vercel.app`
 - `SECONDME_REDIRECT_URI` 必须改成线上地址，例如 `https://your-project.vercel.app/api/auth/callback`
 - `SESSION_SECRET` 必须换成新的高强度随机字符串，不要直接复用演示期暴露过的值
 

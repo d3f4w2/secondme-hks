@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
-import type { Topic, TopicSource, TopicsPayload } from "@/lib/types";
-import { fetchBillboardList } from "@/lib/zhihu-openapi";
+import type { SearchEvidence, Topic, TopicSource, TopicsPayload } from "@/lib/types";
+import { fetchBillboardList, searchGlobal } from "@/lib/zhihu-openapi";
 
 const FALLBACK_TOPICS: Topic[] = [
   {
@@ -66,12 +66,79 @@ const FALLBACK_TOPICS: Topic[] = [
   },
 ];
 
-let hotTopicsCache:
-  | {
-      expiresAt: number;
-      payload: TopicsPayload;
-    }
-  | undefined;
+const FALLBACK_SEARCH_SEED: SearchEvidence[] = [
+  {
+    id: "fallback-source-1",
+    query: "",
+    title: "高赞回答通常只展示结果，不展示代价。",
+    summary: "看热榜时，最该补的不是新观点，而是建议背后的资源条件和失败成本。",
+    link: "https://www.zhihu.com/",
+    author: "答主@职业复盘观察者",
+    authorityLevel: "中高",
+    featuredComment: "没有代价说明的成功经验，默认不具备普遍性。",
+    source: "mock",
+    sourceLabel: "知乎可信搜回退源",
+  },
+  {
+    id: "fallback-source-2",
+    query: "",
+    title: "离现场最近的人，不一定最会表达，但最能说明真实门槛。",
+    summary: "判断谁值得继续听，先找能把第一步障碍和隐形门槛说具体的人。",
+    link: "https://www.zhihu.com/",
+    author: "答主@一线岗位亲历者",
+    authorityLevel: "高",
+    featuredComment: "能讲清第一步怎么做的人，比只讲趋势的人更有参考价值。",
+    source: "mock",
+    sourceLabel: "知乎可信搜回退源",
+  },
+  {
+    id: "fallback-source-3",
+    query: "",
+    title: "真正有帮助的建议，通常同时包含正反案例。",
+    summary: "如果一个观点只有鼓励、没有反例，那更像情绪感染，不像可执行建议。",
+    link: "https://www.zhihu.com/",
+    author: "答主@风险过滤派",
+    authorityLevel: "中",
+    featuredComment: "先看失败样本，再看自己能否承受类似代价。",
+    source: "mock",
+    sourceLabel: "知乎可信搜回退源",
+  },
+];
+
+type CacheEntry<T> = {
+  expiresAt: number;
+  payload: T;
+};
+
+type SearchCacheShape = Map<string, CacheEntry<SearchEvidence[]>>;
+
+declare global {
+  var __zhaoshuiHotTopicsCache: CacheEntry<TopicsPayload> | undefined;
+  var __zhaoshuiSearchCache: SearchCacheShape | undefined;
+}
+
+function billboardCacheTtlMs() {
+  const raw = Number(process.env.ZHIHU_BILLBOARD_CACHE_TTL_SECONDS ?? "180");
+  return Math.max(raw, 30) * 1000;
+}
+
+function searchCacheTtlMs() {
+  const raw = Number(process.env.ZHIHU_SEARCH_CACHE_TTL_SECONDS ?? "21600");
+  return Math.max(raw, 300) * 1000;
+}
+
+function maxSearchResults() {
+  const raw = Number(process.env.ZHIHU_SEARCH_MAX_RESULTS ?? "5");
+  return Math.min(Math.max(raw, 1), 8);
+}
+
+function getSearchCache() {
+  if (!globalThis.__zhaoshuiSearchCache) {
+    globalThis.__zhaoshuiSearchCache = new Map();
+  }
+
+  return globalThis.__zhaoshuiSearchCache;
+}
 
 function hashId(input: string) {
   return createHash("sha1").update(input).digest("hex").slice(0, 12);
@@ -87,6 +154,40 @@ function readString(record: Record<string, unknown>, keys: string[]) {
   }
 
   return "";
+}
+
+function asRecord(value: unknown) {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+}
+
+function firstArray(value: unknown[]) {
+  for (const item of value) {
+    if (Array.isArray(item)) {
+      return item;
+    }
+  }
+
+  return [];
+}
+
+function extractArrayFromPayload(payload: Record<string, unknown>) {
+  const data = payload.data;
+
+  if (Array.isArray(data)) {
+    return data;
+  }
+
+  const nested = data && typeof data === "object" ? (data as Record<string, unknown>) : undefined;
+
+  return firstArray([
+    payload.list,
+    payload.items,
+    payload.results,
+    nested?.list,
+    nested?.items,
+    nested?.results,
+    nested?.data,
+  ]);
 }
 
 function readTags(record: Record<string, unknown>) {
@@ -162,14 +263,82 @@ function normalizeTopicItem(rawItem: unknown, source: TopicSource): Topic | null
   };
 }
 
+function normalizeSearchEvidence(
+  rawItem: unknown,
+  source: TopicSource,
+  query: string,
+): SearchEvidence | null {
+  if (!rawItem || typeof rawItem !== "object") {
+    return null;
+  }
+
+  const item = rawItem as Record<string, unknown>;
+  const target =
+    asRecord(item.target) ||
+    asRecord(item.question) ||
+    asRecord(item.answer) ||
+    asRecord(item.article) ||
+    item;
+  const authorRecord = asRecord(target.author) || asRecord(item.author);
+  const selectedComment =
+    asRecord(item.selected_comment) || asRecord(target.selected_comment);
+  const title =
+    readString(target, ["title", "name"]) ||
+    readString(item, ["title", "name"]);
+
+  if (!title) {
+    return null;
+  }
+
+  const summary =
+    readString(target, ["excerpt", "summary", "answer_abstract", "description"]) ||
+    readString(item, ["summary", "excerpt", "description"]) ||
+    "这条知乎内容可以作为当前议题的补充参考。";
+  const link =
+    readString(target, ["url", "link"]) ||
+    readString(item, ["url", "link"]) ||
+    "https://www.zhihu.com/";
+  const author =
+    (authorRecord && readString(authorRecord, ["name", "headline"])) ||
+    readString(item, ["author_name"]);
+  const authorityLevel =
+    (authorRecord && readString(authorRecord, ["authority_level", "authorityLevel", "level"])) ||
+    readString(item, ["authority_level", "authorityLevel"]);
+  const featuredComment =
+    (selectedComment && readString(selectedComment, ["content", "summary", "excerpt"])) ||
+    readString(item, ["selected_comment", "featured_comment"]);
+
+  return {
+    id: hashId(`${query}:${title}:${link}`),
+    query,
+    title,
+    summary,
+    link,
+    author: author || undefined,
+    authorityLevel: authorityLevel || undefined,
+    featuredComment: featuredComment || undefined,
+    source,
+    sourceLabel: source === "zhihu_api" ? "知乎可信搜" : "知乎可信搜回退源",
+  };
+}
+
+function buildFallbackSearchEvidence(query: string) {
+  return FALLBACK_SEARCH_SEED.map((item) => ({
+    ...item,
+    id: hashId(`${query}:${item.title}`),
+    query,
+  }));
+}
+
+function buildSearchCacheKey(query: string) {
+  return query.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
 async function fetchConfiguredTopics(): Promise<Topic[] | null> {
   const payload = await fetchBillboardList(
     Number(process.env.ZHIHU_BILLBOARD_HOURS ?? "12"),
   );
-  const raw =
-    (Array.isArray(payload.data) && payload.data) ||
-    (Array.isArray(payload.list) && payload.list) ||
-    [];
+  const raw = extractArrayFromPayload(payload as Record<string, unknown>);
   const topics = raw
     .map((item) => normalizeTopicItem(item, "zhihu_api"))
     .filter((item): item is Topic => Boolean(item))
@@ -179,8 +348,10 @@ async function fetchConfiguredTopics(): Promise<Topic[] | null> {
 }
 
 export async function getHotTopics(): Promise<TopicsPayload> {
-  if (hotTopicsCache && hotTopicsCache.expiresAt > Date.now()) {
-    return hotTopicsCache.payload;
+  const cache = globalThis.__zhaoshuiHotTopicsCache;
+
+  if (cache && cache.expiresAt > Date.now()) {
+    return cache.payload;
   }
 
   let payload: TopicsPayload;
@@ -194,8 +365,8 @@ export async function getHotTopics(): Promise<TopicsPayload> {
         source: "zhihu_api",
         usingFallback: false,
       };
-      hotTopicsCache = {
-        expiresAt: Date.now() + 1000 * 60 * 3,
+      globalThis.__zhaoshuiHotTopicsCache = {
+        expiresAt: Date.now() + billboardCacheTtlMs(),
         payload,
       };
       return payload;
@@ -206,8 +377,8 @@ export async function getHotTopics(): Promise<TopicsPayload> {
       source: "mock",
       usingFallback: true,
     };
-    hotTopicsCache = {
-      expiresAt: Date.now() + 1000 * 60,
+    globalThis.__zhaoshuiHotTopicsCache = {
+      expiresAt: Date.now() + 60_000,
       payload,
     };
     return payload;
@@ -218,10 +389,52 @@ export async function getHotTopics(): Promise<TopicsPayload> {
     source: "mock",
     usingFallback: true,
   };
-  hotTopicsCache = {
-    expiresAt: Date.now() + 1000 * 60,
+  globalThis.__zhaoshuiHotTopicsCache = {
+    expiresAt: Date.now() + 60_000,
     payload,
   };
 
   return payload;
+}
+
+export async function getCredibleSearchEvidence(query: string) {
+  const normalizedQuery = buildSearchCacheKey(query);
+  const cache = getSearchCache().get(normalizedQuery);
+
+  if (cache && cache.expiresAt > Date.now()) {
+    return {
+      evidence: cache.payload,
+      source: cache.payload.some((item) => item.source === "zhihu_api") ? "zhihu_api" : "mock",
+      usingFallback: cache.payload.every((item) => item.source === "mock"),
+    } as const;
+  }
+
+  let evidence: SearchEvidence[];
+
+  try {
+    const payload = await searchGlobal(normalizedQuery, 1, maxSearchResults());
+    const raw = extractArrayFromPayload(payload);
+
+    evidence = raw
+      .map((item) => normalizeSearchEvidence(item, "zhihu_api", normalizedQuery))
+      .filter((item): item is SearchEvidence => Boolean(item))
+      .slice(0, maxSearchResults());
+
+    if (!evidence.length) {
+      evidence = buildFallbackSearchEvidence(normalizedQuery);
+    }
+  } catch {
+    evidence = buildFallbackSearchEvidence(normalizedQuery);
+  }
+
+  getSearchCache().set(normalizedQuery, {
+    expiresAt: Date.now() + searchCacheTtlMs(),
+    payload: evidence,
+  });
+
+  return {
+    evidence,
+    source: evidence.some((item) => item.source === "zhihu_api") ? "zhihu_api" : "mock",
+    usingFallback: evidence.every((item) => item.source === "mock"),
+  } as const;
 }

@@ -43,6 +43,19 @@ export type AnalysisResult = {
 
 export type TopicSource = "zhihu_api" | "mock";
 
+export type SearchEvidence = {
+  id: string;
+  query: string;
+  title: string;
+  summary: string;
+  link: string;
+  author?: string;
+  authorityLevel?: string;
+  featuredComment?: string;
+  source: TopicSource;
+  sourceLabel: string;
+};
+
 export type Topic = {
   id: string;
   title: string;
@@ -79,6 +92,7 @@ export type AgentTurn = {
   round: number;
   message: string;
   evidence: string[];
+  sourceIds: string[];
 };
 
 export type RoomSummary = {
@@ -97,6 +111,8 @@ export type RoomState = {
   participants: AgentParticipant[];
   turns: AgentTurn[];
   summary: RoomSummary;
+  searchEvidence: SearchEvidence[];
+  searchSource: TopicSource;
   source: "generated" | "mock";
   createdAt: number;
   personalizedFor?: string;

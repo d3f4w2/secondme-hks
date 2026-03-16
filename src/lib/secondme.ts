@@ -1,8 +1,10 @@
+import { getSecondMeRedirectUri } from "@/lib/app-config";
 import type {
   AgentParticipant,
   AgentTurn,
   AnalysisResult,
   RoomSummary,
+  SearchEvidence,
   SessionPayload,
   SessionUser,
   Topic,
@@ -30,6 +32,7 @@ type RoomActResponse = {
     kind: AgentTurn["kind"];
     message: string;
     evidence: string[];
+    sourceIds?: string[];
   }>;
   summary: Omit<RoomSummary, "followUpTargetName">;
 };
@@ -37,6 +40,7 @@ type RoomActResponse = {
 type FollowUpActResponse = {
   reply: string;
   evidence: string[];
+  sourceIds?: string[];
   suggestion: string;
 };
 
@@ -78,7 +82,7 @@ function clientSecret() {
 }
 
 function redirectUri() {
-  return requiredEnv("SECONDME_REDIRECT_URI");
+  return getSecondMeRedirectUri();
 }
 
 async function parseWrappedResponse<T>(response: Response) {
@@ -221,7 +225,60 @@ function extractJsonObject(content: string) {
   return content.slice(firstBrace, lastBrace + 1);
 }
 
-export async function runStructuredAct<T>(accessToken: string, message: string, actionControl: string) {
+function describeUserContext(context?: UserContext) {
+  if (!context) {
+    return "当前用户未登录 SecondMe，请优先围绕公共议题进行讨论。";
+  }
+
+  const shades = context.shades.length ? context.shades.join("、") : "暂无";
+  const memory =
+    context.softMemory.length > 0
+      ? context.softMemory
+          .slice(0, 3)
+          .map((item) => `${item.title}：${item.summary}`)
+          .join("；")
+      : "暂无";
+
+  return [
+    `围观用户：${context.user.name}`,
+    `兴趣标签：${shades}`,
+    `相关软记忆：${memory}`,
+  ].join("\n");
+}
+
+function describeSearchEvidence(searchEvidence: SearchEvidence[]) {
+  if (!searchEvidence.length) {
+    return "暂无知乎可信搜证据。";
+  }
+
+  return searchEvidence
+    .map((item) => {
+      const meta = [
+        item.author ? `作者：${item.author}` : "",
+        item.authorityLevel ? `authority_level：${item.authorityLevel}` : "",
+        `来源：${item.sourceLabel}`,
+      ]
+        .filter(Boolean)
+        .join("｜");
+
+      return [
+        `${item.id}`,
+        `标题：${item.title}`,
+        `摘要：${item.summary}`,
+        meta,
+        item.featuredComment ? `精选评论：${item.featuredComment}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+    })
+    .join("\n\n");
+}
+
+export async function runStructuredAct<T>(
+  accessToken: string,
+  message: string,
+  actionControl: string,
+) {
   const response = await fetch(`${apiBaseUrl()}/api/secondme/act/stream`, {
     method: "POST",
     headers: {
@@ -422,34 +479,14 @@ function buildDecisionActionControl() {
   ].join("\n");
 }
 
-function describeUserContextForRoom(context?: UserContext) {
-  if (!context) {
-    return "当前围观用户未登录 SecondMe，请优先围绕公共议题讨论。";
-  }
-
-  const shades = context.shades.length ? context.shades.join("、") : "暂无";
-  const memory =
-    context.softMemory.length > 0
-      ? context.softMemory
-          .slice(0, 3)
-          .map((item) => `${item.title}：${item.summary}`)
-          .join("；")
-      : "暂无";
-
-  return [
-    `围观用户：${context.user.name}`,
-    `用户标签：${shades}`,
-    `用户相关记忆：${memory}`,
-    "请在总结时说明哪位代理更值得这个用户继续追问。",
-  ].join("\n");
-}
-
-function buildRoomMessage(topic: Topic, participants: AgentParticipant[], context?: UserContext) {
+function buildRoomMessage(
+  topic: Topic,
+  participants: AgentParticipant[],
+  searchEvidence: SearchEvidence[],
+  context?: UserContext,
+) {
   const participantLines = participants
-    .map(
-      (item) =>
-        `- ${item.id} / ${item.name}：${item.role}；立场：${item.stance}`,
-    )
+    .map((item) => `- ${item.id} / ${item.name}：${item.role}；立场：${item.stance}`)
     .join("\n");
 
   return [
@@ -461,18 +498,21 @@ function buildRoomMessage(topic: Topic, participants: AgentParticipant[], contex
     `来源：${topic.sourceLabel}`,
     "参与代理如下：",
     participantLines,
-    describeUserContextForRoom(context),
+    describeUserContext(context),
+    "以下是供代理引用的知乎可信搜证据池：",
+    describeSearchEvidence(searchEvidence),
     "请让代理之间真实互相回应、补充和质疑，而不是各说各话。",
   ].join("\n\n");
 }
 
-function buildRoomActionControl(participants: AgentParticipant[]) {
+function buildRoomActionControl(participants: AgentParticipant[], searchEvidence: SearchEvidence[]) {
   return [
     "你是热点讨论房的编排器。",
     "仅输出合法 JSON 对象，不要解释，不要 Markdown。",
     "请用中文输出。",
     "必须让代理之间出现引用、反驳、补充或纠偏，体现真实 A2A 过程。",
     `agentId 只能使用以下值：${participants.map((item) => item.id).join("、")}`,
+    `sourceIds 只能使用以下值：${searchEvidence.map((item) => item.id).join("、") || "无"}`,
     "输出结构：",
     JSON.stringify(
       {
@@ -483,6 +523,7 @@ function buildRoomActionControl(participants: AgentParticipant[]) {
             kind: "opening",
             message: "代理发言内容",
             evidence: ["发言依据一", "发言依据二"],
+            sourceIds: [searchEvidence[0]?.id ?? "source_1"],
           },
         ],
         summary: {
@@ -501,6 +542,7 @@ function buildRoomActionControl(participants: AgentParticipant[]) {
     "- turns 固定返回 6 条。",
     "- 至少包含 1 条 challenge 和 1 条 bridge。",
     "- 每条 message 60 到 110 个中文字符。",
+    "- 每条 turns 至少引用 1 条 sourceIds。",
     "- evidence 返回 1 到 2 条，必须具体，不要空泛。",
   ].join("\n");
 }
@@ -510,6 +552,7 @@ function buildFollowUpMessage(
   participant: AgentParticipant,
   turns: AgentTurn[],
   question: string,
+  searchEvidence: SearchEvidence[],
   context?: UserContext,
 ) {
   const discussion = turns
@@ -522,28 +565,32 @@ function buildFollowUpMessage(
     `议题摘要：${topic.summary}`,
     `用户选中的追问对象：${participant.name}，角色：${participant.role}，立场：${participant.stance}`,
     `最近几轮讨论：\n${discussion}`,
-    describeUserContextForRoom(context),
+    describeUserContext(context),
+    "以下是补充的知乎可信搜证据池：",
+    describeSearchEvidence(searchEvidence),
     `用户追问：${question}`,
-    "请你代表这个代理，基于现有讨论和自身立场给出一次回应。",
+    "请你代表这个代理，基于现有讨论、自身立场和知乎证据给出一次回应。",
   ].join("\n\n");
 }
 
-function buildFollowUpActionControl() {
+function buildFollowUpActionControl(searchEvidence: SearchEvidence[]) {
   return [
     "你要代表指定代理回答追问。",
     "仅输出合法 JSON 对象，不要解释，不要 Markdown。",
     "请用中文输出。",
+    `sourceIds 只能使用以下值：${searchEvidence.map((item) => item.id).join("、") || "无"}`,
     "输出结构：",
     JSON.stringify(
       {
         reply: "代理的回答内容",
         evidence: ["引用讨论中的依据", "补充的新依据"],
+        sourceIds: [searchEvidence[0]?.id ?? "source_1"],
         suggestion: "建议用户接下来怎么继续问或怎么验证",
       },
       null,
       2,
     ),
-    "要求：reply 80 到 140 个中文字符，语气符合该代理立场。",
+    "要求：reply 80 到 140 个中文字符，sourceIds 至少返回 1 条。",
   ].join("\n");
 }
 
@@ -567,12 +614,13 @@ export async function generateDiscussionRoom(
   accessToken: string,
   topic: Topic,
   participants: AgentParticipant[],
+  searchEvidence: SearchEvidence[],
   context?: UserContext,
 ) {
   return runStructuredAct<RoomActResponse>(
     accessToken,
-    buildRoomMessage(topic, participants, context),
-    buildRoomActionControl(participants),
+    buildRoomMessage(topic, participants, searchEvidence, context),
+    buildRoomActionControl(participants, searchEvidence),
   );
 }
 
@@ -582,11 +630,12 @@ export async function generateFollowUpReply(
   participant: AgentParticipant,
   turns: AgentTurn[],
   question: string,
+  searchEvidence: SearchEvidence[],
   context?: UserContext,
 ) {
   return runStructuredAct<FollowUpActResponse>(
     accessToken,
-    buildFollowUpMessage(topic, participant, turns, question, context),
-    buildFollowUpActionControl(),
+    buildFollowUpMessage(topic, participant, turns, question, searchEvidence, context),
+    buildFollowUpActionControl(searchEvidence),
   );
 }
