@@ -1,9 +1,10 @@
 import { getSecondMeRedirectUri } from "@/lib/app-config";
 import type {
+  ActionPlan,
   AgentParticipant,
   AgentTurn,
   AnalysisResult,
-  RoomSummary,
+  DiscussionGoal,
   SearchEvidence,
   SessionPayload,
   SessionUser,
@@ -25,6 +26,25 @@ type TokenResponse = {
   scope?: string[];
 };
 
+type RoomActSummary = {
+  discussionGoal?: Partial<DiscussionGoal>;
+  outcomeHeadline?: string;
+  keyTension?: string;
+  consensus?: string[];
+  conflicts?: string[];
+  openQuestions?: string[];
+  whoToAsk?: Array<{
+    agentId?: string;
+    agentName?: string;
+    why?: string;
+    whenToAsk?: string;
+  }>;
+  recommendedNextStep?: string;
+  followUpTargetId?: string;
+  followUpPrompt?: string;
+  actionPlan?: Partial<ActionPlan>;
+};
+
 type RoomActResponse = {
   turns: Array<{
     agentId: string;
@@ -34,7 +54,7 @@ type RoomActResponse = {
     evidence: string[];
     sourceIds?: string[];
   }>;
-  summary: Omit<RoomSummary, "followUpTargetName">;
+  summary: RoomActSummary;
 };
 
 type FollowUpActResponse = {
@@ -426,7 +446,7 @@ function buildDecisionMessage(question: string, context: UserContext) {
       : "暂无可用软记忆";
 
   return [
-    "应用名：找谁",
+    "应用名：讨论实验室",
     `用户名称：${context.user.name}`,
     `用户自我介绍：${context.user.selfIntroduction ?? context.user.bio ?? "暂无"}`,
     `用户兴趣标签：${shades}`,
@@ -438,7 +458,7 @@ function buildDecisionMessage(question: string, context: UserContext) {
 
 function buildDecisionActionControl() {
   return [
-    "你是“找谁”的判断引擎。",
+    "你是“讨论实验室”的判断引擎。",
     "仅输出合法 JSON 对象，不要解释，不要 Markdown，不要代码块。",
     "请使用中文输出。",
     "输出结构：",
@@ -486,13 +506,17 @@ function buildRoomMessage(
   context?: UserContext,
 ) {
   const participantLines = participants
-    .map((item) => `- ${item.id} / ${item.name}：${item.role}；立场：${item.stance}`)
+    .map(
+      (item) =>
+        `- ${item.id} / ${item.name}：${item.role}；立场：${item.stance}；来源：${item.source.displayName}（${item.source.descriptor}）；为何选它：${item.source.whySelected}`,
+    )
     .join("\n");
 
   return [
-    "你要模拟一场知乎热榜议题房间里的多代理讨论。",
+    "你要模拟一场面向真实决策的多代理讨论实验室。",
     `议题标题：${topic.title}`,
     `议题摘要：${topic.summary}`,
+    `热榜首条回答摘要：${topic.leadAnswer ?? "暂无"}`,
     `热度：${topic.heat}`,
     `标签：${topic.tags.join("、") || "暂无"}`,
     `来源：${topic.sourceLabel}`,
@@ -507,10 +531,10 @@ function buildRoomMessage(
 
 function buildRoomActionControl(participants: AgentParticipant[], searchEvidence: SearchEvidence[]) {
   return [
-    "你是热点讨论房的编排器。",
+    "你是讨论实验室的编排器。",
     "仅输出合法 JSON 对象，不要解释，不要 Markdown。",
     "请用中文输出。",
-    "必须让代理之间出现引用、反驳、补充或纠偏，体现真实 A2A 过程。",
+    "必须让代理之间出现引用、反驳、补充、纠偏和收束，体现真实 A2A 过程。",
     `agentId 只能使用以下值：${participants.map((item) => item.id).join("、")}`,
     `sourceIds 只能使用以下值：${searchEvidence.map((item) => item.id).join("、") || "无"}`,
     "输出结构：",
@@ -527,12 +551,69 @@ function buildRoomActionControl(participants: AgentParticipant[], searchEvidence
           },
         ],
         summary: {
-          topicAngle: "一句话概括这场讨论真正聚焦的问题",
-          listenTo: "最后更值得听谁，为什么",
-          caution: "这类话题最该防哪种误判",
+          discussionGoal: {
+            headline: "这场讨论要解决什么",
+            userNeed: "用户真正想拿走什么",
+            successSignal: "什么结果算讨论成功",
+            personalizedAngle: "这场讨论如何结合用户处境",
+          },
+          outcomeHeadline: "一句话给出本场讨论收束后的结论",
+          keyTension: "一句话说明这场争论真正的冲突是什么",
+          consensus: ["已形成的第一条共识", "已形成的第二条共识", "已形成的第三条共识"],
+          conflicts: ["尚未完全解决的第一条分歧", "尚未完全解决的第二条分歧"],
+          openQuestions: ["下一轮还需要补的第一个问题", "下一轮还需要补的第二个问题"],
+          whoToAsk: [
+            {
+              agentId: participants[0]?.id ?? "agent_1",
+              agentName: participants[0]?.name ?? "代理一",
+              why: "为什么先找这个代理",
+              whenToAsk: "什么时候应该先问它",
+            },
+            {
+              agentId: participants[1]?.id ?? "agent_2",
+              agentName: participants[1]?.name ?? "代理二",
+              why: "为什么第二个找它",
+              whenToAsk: "什么时候应该补问它",
+            },
+            {
+              agentId: participants[2]?.id ?? "agent_3",
+              agentName: participants[2]?.name ?? "代理三",
+              why: "为什么最后找它",
+              whenToAsk: "什么时候适合收束时问它",
+            },
+          ],
+          recommendedNextStep: "用户现在最值得执行的下一步",
           followUpTargetId: participants[0]?.id ?? "agent_1",
           followUpPrompt: "用户下一步可以直接追问该代理的一句话",
-          takeaways: ["关键收获一", "关键收获二", "关键收获三"],
+          actionPlan: {
+            headline: "把本场讨论沉淀成什么行动方案",
+            firstMove: "用户现在第一步该做什么",
+            steps: [
+              {
+                title: "行动步骤一",
+                why: "为什么先做这一步",
+                howToStart: "怎么启动",
+                risk: "最大的风险",
+                owner: "谁来做",
+              },
+              {
+                title: "行动步骤二",
+                why: "为什么接着做这一步",
+                howToStart: "怎么启动",
+                risk: "最大的风险",
+                owner: "谁来做",
+              },
+              {
+                title: "行动步骤三",
+                why: "为什么最后做这一步",
+                howToStart: "怎么启动",
+                risk: "最大的风险",
+                owner: "谁来做",
+              },
+            ],
+            riskChecks: ["需要警惕的风险一", "需要警惕的风险二", "需要警惕的风险三"],
+            validationQuestions: ["需要验证的问题一", "需要验证的问题二", "需要验证的问题三"],
+          },
         },
       },
       null,
@@ -544,6 +625,8 @@ function buildRoomActionControl(participants: AgentParticipant[], searchEvidence
     "- 每条 message 60 到 110 个中文字符。",
     "- 每条 turns 至少引用 1 条 sourceIds。",
     "- evidence 返回 1 到 2 条，必须具体，不要空泛。",
+    "- summary 必须体现讨论目标、收束结论、未解分歧和行动方案，而不是只给观点总结。",
+    "- whoToAsk 必须返回 3 项，明确先问谁、为什么问、什么时候问。",
   ].join("\n");
 }
 
@@ -563,6 +646,7 @@ function buildFollowUpMessage(
   return [
     `当前议题：${topic.title}`,
     `议题摘要：${topic.summary}`,
+    `热榜首条回答摘要：${topic.leadAnswer ?? "暂无"}`,
     `用户选中的追问对象：${participant.name}，角色：${participant.role}，立场：${participant.stance}`,
     `最近几轮讨论：\n${discussion}`,
     describeUserContext(context),

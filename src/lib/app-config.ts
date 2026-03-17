@@ -4,13 +4,18 @@ function trimTrailingSlash(value: string) {
   return value.replace(/\/+$/, "");
 }
 
+function readOptionalEnv(name: string) {
+  const value = process.env[name];
+  return value && value.trim() ? value.trim() : undefined;
+}
+
 export function getAppBaseUrl() {
-  return trimTrailingSlash(process.env.APP_BASE_URL ?? DEFAULT_APP_BASE_URL);
+  return trimTrailingSlash(readOptionalEnv("APP_BASE_URL") ?? DEFAULT_APP_BASE_URL);
 }
 
 export function getSecondMeRedirectUri() {
   return trimTrailingSlash(
-    process.env.SECONDME_REDIRECT_URI ?? `${getAppBaseUrl()}/api/auth/callback`,
+    readOptionalEnv("SECONDME_REDIRECT_URI") ?? `${getAppBaseUrl()}/api/auth/callback`,
   );
 }
 

@@ -12,6 +12,7 @@ const FALLBACK_TOPICS: Topic[] = [
     heat: "热榜 03",
     link: "https://www.zhihu.com/",
     tags: ["职业选择", "实习", "大厂"],
+    entryMode: "hot",
     source: "mock",
     sourceLabel: "知乎热榜回退源",
     updatedAt: "刚刚更新",
@@ -24,6 +25,7 @@ const FALLBACK_TOPICS: Topic[] = [
     heat: "热榜 05",
     link: "https://www.zhihu.com/",
     tags: ["AI", "就业", "技能"],
+    entryMode: "hot",
     source: "mock",
     sourceLabel: "知乎热榜回退源",
     updatedAt: "2 分钟前",
@@ -36,6 +38,7 @@ const FALLBACK_TOPICS: Topic[] = [
     heat: "热榜 08",
     link: "https://www.zhihu.com/",
     tags: ["留学", "求职", "城市选择"],
+    entryMode: "hot",
     source: "mock",
     sourceLabel: "知乎热榜回退源",
     updatedAt: "5 分钟前",
@@ -48,6 +51,7 @@ const FALLBACK_TOPICS: Topic[] = [
     heat: "热榜 11",
     link: "https://www.zhihu.com/",
     tags: ["独立开发", "副业", "创业"],
+    entryMode: "hot",
     source: "mock",
     sourceLabel: "知乎热榜回退源",
     updatedAt: "7 分钟前",
@@ -60,6 +64,7 @@ const FALLBACK_TOPICS: Topic[] = [
     heat: "热榜 14",
     link: "https://www.zhihu.com/",
     tags: ["转行", "产品经理", "运营"],
+    entryMode: "hot",
     source: "mock",
     sourceLabel: "知乎热榜回退源",
     updatedAt: "10 分钟前",
@@ -128,7 +133,7 @@ function searchCacheTtlMs() {
 }
 
 function maxSearchResults() {
-  const raw = Number(process.env.ZHIHU_SEARCH_MAX_RESULTS ?? "5");
+  const raw = Number(process.env.ZHIHU_SEARCH_COUNT ?? "5");
   return Math.min(Math.max(raw, 1), 8);
 }
 
@@ -237,29 +242,53 @@ function normalizeTopicItem(rawItem: unknown, source: TopicSource): Topic | null
   }
 
   const summary =
-    readString(nested, ["excerpt", "summary", "description", "answer_abstract"]) ||
-    readString(item, ["detail_text", "caption"]) ||
+    readString(nested, ["excerpt", "summary", "description", "answer_abstract", "body"]) ||
+    readString(item, ["detail_text", "caption", "body"]) ||
     "该议题目前在社区内引发了明显分歧，适合进入多代理讨论。";
   const link =
-    readString(nested, ["url", "link"]) ||
-    readString(item, ["url", "link"]) ||
+    readString(nested, ["url", "link", "link_url"]) ||
+    readString(item, ["url", "link", "link_url"]) ||
     "https://www.zhihu.com/";
+  const heatScoreRaw =
+    (typeof item.heat_score === "number" && item.heat_score) ||
+    (typeof nested.heat_score === "number" && nested.heat_score) ||
+    undefined;
   const heat =
     readString(item, ["detail_text", "heat", "metrics", "score"]) ||
     readString(nested, ["heat", "followers"]) ||
-    "热度上升中";
+    (heatScoreRaw ? `热度 ${heatScoreRaw.toLocaleString("zh-CN")}` : "热度上升中");
   const tags = readTags(nested).length ? readTags(nested) : readTags(item);
+  const answers = Array.isArray(item.answers) ? item.answers : [];
+  const firstAnswer = answers.find((entry) => entry && typeof entry === "object") as
+    | Record<string, unknown>
+    | undefined;
+  const leadAnswer =
+    (firstAnswer &&
+      (readString(firstAnswer, ["body", "summary", "content_text"]) || "").slice(0, 220)) ||
+    undefined;
+  const token =
+    readString(item, ["token"]) ||
+    readString(nested, ["token"]) ||
+    undefined;
+  const updatedAt =
+    readString(item, ["published_time_str"]) ||
+    readString(nested, ["published_time_str"]) ||
+    "刚刚更新";
 
   return {
     id: hashId(title + link),
     title,
     summary,
+    leadAnswer,
     heat,
+    heatScore: heatScoreRaw,
     link,
+    token,
     tags,
+    entryMode: "hot",
     source,
     sourceLabel: source === "zhihu_api" ? "知乎热榜接口" : "知乎热榜回退源",
-    updatedAt: "刚刚更新",
+    updatedAt,
   };
 }
 
@@ -291,8 +320,8 @@ function normalizeSearchEvidence(
   }
 
   const summary =
-    readString(target, ["excerpt", "summary", "answer_abstract", "description"]) ||
-    readString(item, ["summary", "excerpt", "description"]) ||
+    readString(target, ["excerpt", "summary", "answer_abstract", "description", "content_text"]) ||
+    readString(item, ["summary", "excerpt", "description", "content_text"]) ||
     "这条知乎内容可以作为当前议题的补充参考。";
   const link =
     readString(target, ["url", "link"]) ||
@@ -306,7 +335,32 @@ function normalizeSearchEvidence(
     readString(item, ["authority_level", "authorityLevel"]);
   const featuredComment =
     (selectedComment && readString(selectedComment, ["content", "summary", "excerpt"])) ||
+    (Array.isArray(item.comment_info_list) &&
+      item.comment_info_list.find((entry) => entry && typeof entry === "object") &&
+      readString(
+        item.comment_info_list.find((entry) => entry && typeof entry === "object") as Record<
+          string,
+          unknown
+        >,
+        ["content"],
+      )) ||
     readString(item, ["selected_comment", "featured_comment"]);
+  const voteUpCount =
+    (typeof item.vote_up_count === "number" && item.vote_up_count) ||
+    (typeof target.vote_up_count === "number" && target.vote_up_count) ||
+    undefined;
+  const commentCount =
+    (typeof item.comment_count === "number" && item.comment_count) ||
+    (typeof target.comment_count === "number" && target.comment_count) ||
+    undefined;
+  const contentType =
+    readString(item, ["content_type", "type"]) ||
+    readString(target, ["content_type", "type"]) ||
+    undefined;
+  const contentId =
+    readString(item, ["content_id", "token"]) ||
+    readString(target, ["content_id", "token"]) ||
+    undefined;
 
   return {
     id: hashId(`${query}:${title}:${link}`),
@@ -314,9 +368,13 @@ function normalizeSearchEvidence(
     title,
     summary,
     link,
+    contentType,
+    contentId,
     author: author || undefined,
     authorityLevel: authorityLevel || undefined,
     featuredComment: featuredComment || undefined,
+    voteUpCount,
+    commentCount,
     source,
     sourceLabel: source === "zhihu_api" ? "知乎可信搜" : "知乎可信搜回退源",
   };
@@ -334,11 +392,36 @@ function buildSearchCacheKey(query: string) {
   return query.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+function buildQuestionTags(question: string, evidence: SearchEvidence[]) {
+  const tags = ["自定义问题"];
+  const contentTag = evidence.find((item) => item.contentType)?.contentType;
+  const authorTag = evidence.find((item) => item.author)?.author;
+
+  if (contentTag) {
+    tags.push(contentTag);
+  }
+
+  if (authorTag) {
+    tags.push(authorTag.replace(/^答主@/, ""));
+  }
+
+  if (question.includes("职业") || question.includes("求职")) {
+    tags.push("职业判断");
+  } else if (question.includes("创业") || question.includes("项目")) {
+    tags.push("项目判断");
+  } else if (question.includes("学习")) {
+    tags.push("学习决策");
+  }
+
+  return Array.from(new Set(tags)).slice(0, 4);
+}
+
 async function fetchConfiguredTopics(): Promise<Topic[] | null> {
   const payload = await fetchBillboardList(
-    Number(process.env.ZHIHU_BILLBOARD_HOURS ?? "12"),
+    Number(process.env.ZHIHU_BILLBOARD_TOP_CNT ?? "20"),
+    Number(process.env.ZHIHU_BILLBOARD_PUBLISH_IN_HOURS ?? "48"),
   );
-  const raw = extractArrayFromPayload(payload as Record<string, unknown>);
+  const raw = extractArrayFromPayload(payload as unknown as Record<string, unknown>);
   const topics = raw
     .map((item) => normalizeTopicItem(item, "zhihu_api"))
     .filter((item): item is Topic => Boolean(item))
@@ -412,7 +495,7 @@ export async function getCredibleSearchEvidence(query: string) {
   let evidence: SearchEvidence[];
 
   try {
-    const payload = await searchGlobal(normalizedQuery, 1, maxSearchResults());
+    const payload = await searchGlobal(normalizedQuery, maxSearchResults());
     const raw = extractArrayFromPayload(payload);
 
     evidence = raw
@@ -436,5 +519,36 @@ export async function getCredibleSearchEvidence(query: string) {
     evidence,
     source: evidence.some((item) => item.source === "zhihu_api") ? "zhihu_api" : "mock",
     usingFallback: evidence.every((item) => item.source === "mock"),
+  } as const;
+}
+
+export async function createTopicFromQuestion(question: string) {
+  const normalizedQuestion = question.trim();
+  const searchPayload = await getCredibleSearchEvidence(normalizedQuestion);
+  const lead = searchPayload.evidence[0];
+  const topic: Topic = {
+    id: `question-${hashId(normalizedQuestion)}`,
+    title: normalizedQuestion,
+    summary:
+      lead?.summary ??
+      "这是一个由用户主动发起的真实问题，系统会去知乎检索相近讨论并组织多代理交锋。",
+    leadAnswer: lead?.featuredComment ?? lead?.summary,
+    heat: "用户问题",
+    heatScore: undefined,
+    link: lead?.link ?? "https://www.zhihu.com/",
+    token: lead?.contentId,
+    tags: buildQuestionTags(normalizedQuestion, searchPayload.evidence),
+    entryMode: "custom",
+    originalQuestion: normalizedQuestion,
+    source: searchPayload.source,
+    sourceLabel: searchPayload.source === "zhihu_api" ? "知乎问题检索" : "问题检索回退源",
+    updatedAt: "刚刚创建",
+  };
+
+  return {
+    topic,
+    evidence: searchPayload.evidence,
+    source: searchPayload.source,
+    usingFallback: searchPayload.usingFallback,
   } as const;
 }

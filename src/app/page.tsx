@@ -14,7 +14,7 @@ function resolveStatusMessage(searchParams: SearchParams) {
   if (connected === "1") {
     return {
       type: "success" as const,
-      text: "SecondMe 已连接，你现在可以围观并追问热榜讨论房。",
+      text: "SecondMe 已连接，你现在可以把个人画像带入讨论，并获得更个性化的找谁建议。",
     };
   }
 

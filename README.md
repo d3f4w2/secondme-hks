@@ -1,11 +1,14 @@
-# 找谁 · 热点讨论房
+# 讨论实验室
 
-`找谁` 现在是一个基于 `SecondMe + 知乎实验能力` 的热点讨论房：
+`讨论实验室` 现在是一个基于 `SecondMe + 知乎实验能力` 的 A2A 问题讨论产品：
 
-- 从 `知乎热榜` 拉取热点议题
-- 让多个知乎用户代理围绕同一话题展开可见的 A2A 讨论
-- 用户围观讨论后，再向某个代理继续追问
-- 登录 `SecondMe` 后，追问会结合用户画像、兴趣标签和软记忆
+- 支持 `知乎热点问题` 和 `用户自定义问题` 双入口
+- 针对问题去知乎检索相近讨论与真实答主内容
+- 将知乎真实用户/回答抽象为多个具备不同职责的代理
+- 让这些代理围绕同一问题展开可见的 A2A 讨论
+- 在讨论中引入 `全网可信搜` 结果作为真实论据
+- 讨论结束后输出：`找谁 / 为什么找 / 怎么做`
+- 登录 `SecondMe` 后，讨论目标、追问顺序和行动建议会结合用户画像、兴趣标签和软记忆
 
 ## 本地开发
 
@@ -13,94 +16,68 @@
 2. `npm run dev`
 3. 打开 `http://localhost:3000`
 
-## 部署到 Vercel
-
-### 1. 初始化并推送到 GitHub
-
-如果当前目录还不是 Git 仓库，先执行：
-
-```bash
-git init
-git add .
-git commit -m "first commit"
-git branch -M main
-git remote add origin https://github.com/<your-account>/<your-repo>.git
-git push -u origin main
-```
-
-`.gitignore` 已忽略 `.env.local`、`.next`、`node_modules` 和 `.secondme/`，不会把本地敏感配置一起推上去。
-
-### 2. 在 Vercel 导入仓库
-
-1. 登录 Vercel
-2. 选择 `Add New -> Project`
-3. 导入当前 GitHub 仓库
-4. Framework 保持 `Next.js`
-5. Build Command 保持 `npm run build`
-6. 首次先使用默认的 `*.vercel.app` 域名
-
-### 3. 配置线上环境变量
-
-把 `.env.vercel.example` 里的变量逐条填入 Vercel Project Settings -> Environment Variables。
-
-需要重点确认两项：
-
-- `APP_BASE_URL` 建议设置成站点根地址，例如 `https://your-project.vercel.app`
-- `SECONDME_REDIRECT_URI` 必须改成线上地址，例如 `https://your-project.vercel.app/api/auth/callback`
-- `SESSION_SECRET` 必须换成新的高强度随机字符串，不要直接复用演示期暴露过的值
-
-### 4. 同步 SecondMe OAuth 回调地址
-
-到 SecondMe 开发者后台，把 OAuth 回调地址更新为：
-
-```text
-https://your-project.vercel.app/api/auth/callback
-```
-
-如果后台支持多个回调地址，建议同时保留本地开发地址：
-
-```text
-http://localhost:3000/api/auth/callback
-```
-
-### 5. 上线后检查
-
-- 首页可以正常打开
-- `GET /api/topics` 返回 200
-- 点击登录可以跳转到 SecondMe 授权页
-- 授权后能正确回到站点首页
-- 登录后再发起追问不会报未授权错误
-
 ## 已接入的本地接口层
 
 - `GET /api/topics`
 - `POST /api/rooms`
 - `GET /api/rooms/:roomId`
 - `POST /api/rooms/:roomId/follow-up`
+- `GET /api/health`
 
 ## 知乎 OpenAPI 配置
 
-项目默认按黑客松文档使用：
+项目按黑客松接口清单预留了这些能力：
 
-- Base URL: `https://openapi.zhihu.com`
-- 热榜: `GET /openapi/billboard/list`
-- 全网可信搜: `GET /openapi/search/global`
-- 圈子详情: `GET /openapi/ring/detail`
-- 发想法: `POST /openapi/publish/pin`
-- 点赞: `POST /openapi/reaction`
-- 评论: `POST /openapi/comment/create`
-- 评论列表: `GET /openapi/comment/list`
+- `GET /openapi/billboard/list`
+- `GET /openapi/search/global`
+- `GET /openapi/ring/detail`
+- `POST /openapi/publish/pin`
+- `POST /openapi/reaction`
+- `POST /openapi/comment/create`
+- `GET /openapi/comment/list`
 
-当前仓库已经预留这些接口的方法封装，位于 `src/lib/zhihu-openapi.ts`。
+客户端封装位于 `src/lib/zhihu-openapi.ts`。
 
 ## 鉴权说明
 
-- 当前支持两种接法：
-  - 直接在环境变量里提供完整鉴权头：`ZHIHU_OPENAPI_AUTH_HEADER` + `ZHIHU_OPENAPI_AUTH_VALUE`
-  - 提供 `AK/SK` 并启用 `ZHIHU_OPENAPI_SIGN_MODE=raw_hmac_sha256` 作为临时签名模式
-- 由于你提供的手册摘要里没有完整签名算法细则，默认会回退到本地 mock 热榜，保证演示不被阻塞。
+- `ZHIHU_OPENAPI_AK` 对应文档里的 `app_key`，也就是用户 token
+- `ZHIHU_OPENAPI_SK` 对应文档里的 `app_secret`
+- 请求头已按文档实现：
+  - `X-App-Key`
+  - `X-Timestamp`
+  - `X-Log-Id`
+  - `X-Extra-Info`
+  - `X-Sign`
+- 签名串格式：
+  - `app_key:{app_key}|ts:{timestamp}|logid:{log_id}|extra_info:{extra_info}`
+- 签名算法：
+  - `HMAC-SHA256` 后做 `Base64`
+- 仍保留 `ZHIHU_OPENAPI_AUTH_HEADER` / `ZHIHU_OPENAPI_AUTH_VALUE` 作为调试附加头。
+
+## 热榜与可信搜参数
+
+- 热榜使用：
+  - `ZHIHU_BILLBOARD_TOP_CNT`
+  - `ZHIHU_BILLBOARD_PUBLISH_IN_HOURS`
+- 可信搜使用：
+  - `ZHIHU_SEARCH_COUNT`
+  - `ZHIHU_SEARCH_CACHE_TTL_SECONDS`
+- 当前实现会把可信搜结果同时接入：
+  - 房间创建阶段
+  - 用户追问阶段
+
+## 生产部署
+
+- 已启用 Next.js `standalone` 输出，适合标准 Node 服务部署。
+- 生产环境需要设置 `APP_BASE_URL` 和线上 `SECONDME_REDIRECT_URI`。
+- 若使用 Vercel，请同步设置：
+  - `ZHIHU_OPENAPI_EXTRA_INFO`
+  - `ZHIHU_BILLBOARD_TOP_CNT`
+  - `ZHIHU_BILLBOARD_PUBLISH_IN_HOURS`
+  - `ZHIHU_SEARCH_COUNT`
+- `yycore` 部署清单见 `docs/2026-03-16-yycore-deploy.md`。
 
 ## 安全说明
 
 - `.env.local` 和 `.secondme/` 已加入忽略。
-- 当前 `SecondMe Client Secret` 已在外部对话中暴露过，建议演示前轮换一次。
+- 当前 `SecondMe Client Secret` 已在外部对话中暴露过，演示前建议轮换一次。

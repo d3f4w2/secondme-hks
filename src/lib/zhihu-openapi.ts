@@ -1,8 +1,19 @@
-import { createHmac, createHash, randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 
 const DEFAULT_ZHIHU_OPENAPI_BASE_URL = "https://openapi.zhihu.com";
 
-export type ZhihuBillboardItem = Record<string, unknown>;
+type ZhihuEnvelope<T> = {
+  status?: number;
+  code?: number;
+  msg?: string;
+  data?: T | null;
+  error?: {
+    code?: number;
+    name?: string;
+    message?: string;
+  };
+  message?: string;
+};
 
 type ZhihuRequestOptions = {
   method: "GET" | "POST";
@@ -11,8 +22,25 @@ type ZhihuRequestOptions = {
   body?: unknown;
 };
 
+function readOptionalEnv(name: string) {
+  const value = process.env[name];
+  return value && value.trim() ? value.trim() : undefined;
+}
+
 function zhihuBaseUrl() {
-  return process.env.ZHIHU_OPENAPI_BASE_URL ?? DEFAULT_ZHIHU_OPENAPI_BASE_URL;
+  return readOptionalEnv("ZHIHU_OPENAPI_BASE_URL") ?? DEFAULT_ZHIHU_OPENAPI_BASE_URL;
+}
+
+function zhihuAppKey() {
+  return readOptionalEnv("ZHIHU_OPENAPI_AK");
+}
+
+function zhihuAppSecret() {
+  return readOptionalEnv("ZHIHU_OPENAPI_SK");
+}
+
+function zhihuExtraInfo() {
+  return readOptionalEnv("ZHIHU_OPENAPI_EXTRA_INFO") ?? "";
 }
 
 function buildQueryString(query?: Record<string, string | number | undefined>) {
@@ -29,9 +57,9 @@ function buildQueryString(query?: Record<string, string | number | undefined>) {
   return params.toString();
 }
 
-function buildStaticAuthHeaders() {
-  const headerName = process.env.ZHIHU_OPENAPI_AUTH_HEADER;
-  const headerValue = process.env.ZHIHU_OPENAPI_AUTH_VALUE;
+function buildDebugHeader() {
+  const headerName = readOptionalEnv("ZHIHU_OPENAPI_AUTH_HEADER");
+  const headerValue = readOptionalEnv("ZHIHU_OPENAPI_AUTH_VALUE");
 
   if (!headerName || !headerValue) {
     return null;
@@ -42,61 +70,54 @@ function buildStaticAuthHeaders() {
   };
 }
 
-function buildRawHmacHeaders(options: {
-  method: string;
-  path: string;
-  queryString: string;
-  bodyString: string;
-}) {
-  const ak = process.env.ZHIHU_OPENAPI_AK;
-  const sk = process.env.ZHIHU_OPENAPI_SK;
-  const signMode = process.env.ZHIHU_OPENAPI_SIGN_MODE;
+function buildSignedHeaders() {
+  const appKey = zhihuAppKey();
+  const appSecret = zhihuAppSecret();
 
-  if (!ak || !sk || signMode !== "raw_hmac_sha256") {
-    return null;
+  if (!appKey || !appSecret) {
+    throw new Error("Zhihu OpenAPI app_key/app_secret is not configured");
   }
 
-  // This is an opt-in provisional signer until the official Zhihu
-  // canonical-signature spec from the hackathon doc is available locally.
   const timestamp = String(Math.floor(Date.now() / 1000));
-  const nonce = randomUUID();
-  const canonical = [
-    options.method.toUpperCase(),
-    options.path,
-    options.queryString,
-    timestamp,
-    nonce,
-    createHash("sha256").update(options.bodyString).digest("hex"),
-  ].join("\n");
-  const signature = createHmac("sha256", sk).update(canonical).digest("hex");
+  const logId = `log_${Date.now()}_${randomUUID().slice(0, 8)}`;
+  const extraInfo = zhihuExtraInfo();
+  const signString = `app_key:${appKey}|ts:${timestamp}|logid:${logId}|extra_info:${extraInfo}`;
+  const sign = createHmac("sha256", appSecret).update(signString).digest("base64");
 
   return {
-    "X-Zhihu-AK": ak,
-    "X-Zhihu-Timestamp": timestamp,
-    "X-Zhihu-Nonce": nonce,
-    "X-Zhihu-Signature": signature,
+    "X-App-Key": appKey,
+    "X-Timestamp": timestamp,
+    "X-Log-Id": logId,
+    "X-Extra-Info": extraInfo,
+    "X-Sign": sign,
   };
 }
 
-function buildAuthHeaders(options: {
-  method: string;
-  path: string;
-  queryString: string;
-  bodyString: string;
-}) {
-  const staticHeaders = buildStaticAuthHeaders();
+async function parseZhihuResponse<T>(response: Response) {
+  let payload: ZhihuEnvelope<T>;
 
-  if (staticHeaders) {
-    return staticHeaders;
+  try {
+    payload = (await response.json()) as ZhihuEnvelope<T>;
+  } catch {
+    throw new Error(`Zhihu OpenAPI failed with ${response.status}`);
   }
 
-  const rawHmacHeaders = buildRawHmacHeaders(options);
+  const apiFailed =
+    !response.ok ||
+    payload.status === 1 ||
+    payload.code === 1 ||
+    payload.error;
 
-  if (rawHmacHeaders) {
-    return rawHmacHeaders;
+  if (apiFailed) {
+    const message =
+      payload.error?.message ||
+      payload.msg ||
+      payload.message ||
+      `Zhihu OpenAPI failed with ${response.status}`;
+    throw new Error(message);
   }
 
-  throw new Error("Zhihu OpenAPI auth is not configured");
+  return payload;
 }
 
 export async function requestZhihuOpenApi<T>({
@@ -113,53 +134,51 @@ export async function requestZhihuOpenApi<T>({
     headers: {
       Accept: "application/json",
       ...(body ? { "Content-Type": "application/json" } : {}),
-      ...buildAuthHeaders({
-        method,
-        path,
-        queryString,
-        bodyString,
-      }),
+      ...buildSignedHeaders(),
+      ...(buildDebugHeader() ?? {}),
     },
     body: body ? bodyString : undefined,
     cache: "no-store",
   });
 
-  if (!response.ok) {
-    throw new Error(`Zhihu OpenAPI failed with ${response.status}`);
-  }
-
-  return (await response.json()) as T;
+  return parseZhihuResponse<T>(response);
 }
 
-export async function fetchBillboardList(hours = 12) {
-  return requestZhihuOpenApi<{ data?: ZhihuBillboardItem[]; list?: ZhihuBillboardItem[] }>({
+export async function fetchBillboardList(topCount = 50, publishInHours = 48) {
+  return requestZhihuOpenApi<{
+    list?: Record<string, unknown>[];
+    pagination?: Record<string, unknown>;
+  }>({
     method: "GET",
     path: "/openapi/billboard/list",
     query: {
-      hours,
+      top_cnt: topCount,
+      publish_in_hours: publishInHours,
     },
   });
 }
 
-export async function searchGlobal(keyword: string, page = 1, pageSize = 10) {
-  return requestZhihuOpenApi<Record<string, unknown>>({
+export async function searchGlobal(query: string, count = 10) {
+  return requestZhihuOpenApi<{
+    has_more?: boolean;
+    items?: Record<string, unknown>[];
+  }>({
     method: "GET",
     path: "/openapi/search/global",
     query: {
-      keyword,
-      page,
-      page_size: pageSize,
+      query,
+      count,
     },
   });
 }
 
-export async function getRingDetail(ringId: string, page = 1, pageSize = 20) {
+export async function getRingDetail(ringId: string, pageNum = 1, pageSize = 20) {
   return requestZhihuOpenApi<Record<string, unknown>>({
     method: "GET",
     path: "/openapi/ring/detail",
     query: {
       ring_id: ringId,
-      page,
+      page_num: pageNum,
       page_size: pageSize,
     },
   });
@@ -189,13 +208,22 @@ export async function createComment(payload: Record<string, unknown>) {
   });
 }
 
-export async function listComments(targetId: string, page = 1, pageSize = 20) {
+export async function deleteComment(payload: Record<string, unknown>) {
+  return requestZhihuOpenApi<Record<string, unknown>>({
+    method: "POST",
+    path: "/openapi/comment/delete",
+    body: payload,
+  });
+}
+
+export async function listComments(contentType: string, contentToken: string, pageNum = 1, pageSize = 20) {
   return requestZhihuOpenApi<Record<string, unknown>>({
     method: "GET",
     path: "/openapi/comment/list",
     query: {
-      target_id: targetId,
-      page,
+      content_type: contentType,
+      content_token: contentToken,
+      page_num: pageNum,
       page_size: pageSize,
     },
   });
